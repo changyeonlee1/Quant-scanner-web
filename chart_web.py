@@ -15,7 +15,7 @@ import re
 st.set_page_config(page_title="PRO 퀀트 스캐너 웹", page_icon="🚀", layout="wide")
 
 # ==========================================
-# 🧠 2. 데이터 캐싱
+# 🧠 2. 데이터 캐싱 (매번 다운로드 방지하여 속도 극대화)
 # ==========================================
 @st.cache_data(ttl=3600) 
 def load_krx_data():
@@ -182,31 +182,33 @@ if start_btn:
             st.session_state['scan_result'] = df_result
 
 # ==========================================
-# 📊 6. 결과 렌더링 및 필터링 기능 (업데이트 됨!)
+# 📊 6. 결과 렌더링 및 필터링 기능 (UI 강조 업데이트 적용)
 # ==========================================
 if not st.session_state['scan_result'].empty:
     st.markdown("---")
     st.subheader("📊 스캔 결과")
     
-    # 원본 데이터프레임 가져오기
     df_view = st.session_state['scan_result']
     total_count = len(df_view)
     
-    # 💡 다중 조건 필터 스위치 (토글)
-    col1, col2 = st.columns([1, 2])
-    with col1:
-        # 스마트폰에서 누르기 편한 토글 버튼 생성
-        show_multi_only = st.toggle("🔥 다중 조건(중복 포착) 종목만 보기", value=False)
+    with st.container(border=True):
+        st.markdown("#### 🎯 핵심 타점 압축 필터")
+        col1, col2 = st.columns([1, 1])
+        with col1:
+            show_multi_only = st.toggle("🔥 [강력 추천] 2개 이상 조건이 겹친 '진국 종목'만 남기기", value=False)
+        with col2:
+            if show_multi_only:
+                st.success("✅ 필터 ON: 노이즈가 제거된 최상급 타점만 표시 중입니다.")
+            else:
+                st.caption("👈 스위치를 켜면 승률이 가장 높은 알짜 종목만 골라냅니다.")
         
-    # 필터가 켜졌다면 데이터프레임 거르기
     if show_multi_only:
         df_view = df_view[df_view['상세 포착 이유'].str.contains("중복 포착", na=False)]
         filtered_count = len(df_view)
-        st.info(f"💡 전체 {total_count}개 중, 다중 조건이 겹친 {filtered_count}개 종목만 필터링 되었습니다.")
+        st.warning(f"💡 전체 {total_count}개 중, 강력한 다중 조건이 겹친 **{filtered_count}개** 종목만 엑기스로 뽑아냈습니다.")
     else:
-        st.info(f"💡 전체 {total_count}개 종목이 표시 중입니다.")
+        st.info(f"💡 전체 {total_count}개 종목이 표시 중입니다. (위 스위치를 켜서 종목을 압축해 보세요!)")
     
-    # 필터링이 적용된 데이터프레임을 화면에 출력
     st.dataframe(df_view, use_container_width=True)
     
     @st.cache_data
@@ -217,7 +219,6 @@ if not st.session_state['scan_result'].empty:
             df.to_excel(writer, index=False, sheet_name='스캔결과')
         return output.getvalue()
     
-    # 💡 엑셀 다운로드도 필터링된 데이터(df_view)를 기준으로 다운로드 되도록 연동
     excel_data = convert_df(df_view)
     st.download_button(
         label="📥 엑셀 파일로 다운로드 (현재 보이는 표 기준)",
