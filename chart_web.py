@@ -15,14 +15,13 @@ import re
 st.set_page_config(page_title="PRO 퀀트 스캐너 웹", page_icon="🚀", layout="wide")
 
 # ==========================================
-# 🧠 2. 데이터 캐싱 (매번 다운로드 방지하여 속도 극대화)
+# 🧠 2. 데이터 캐싱
 # ==========================================
-@st.cache_data(ttl=3600) # 1시간 동안 KRX 데이터 기억
+@st.cache_data(ttl=3600) 
 def load_krx_data():
     df_krx = fdr.StockListing('KRX')
     df_desc = fdr.StockListing('KRX-DESC')
     
-    # 테마 사전 만들기
     theme_dict = {}
     for _, row in df_desc.iterrows():
         sector = str(row['Sector']) if pd.notna(row['Sector']) else ""
@@ -32,7 +31,7 @@ def load_krx_data():
     return df_krx, df_desc, theme_dict
 
 # ==========================================
-# ⚙️ 3. 단일 종목 분석 엔진 (기존 v1.8과 100% 동일)
+# ⚙️ 3. 단일 종목 분석 엔진
 # ==========================================
 def analyze_single_stock(code, name, ticker_yf, condition_type, start_date, use_shield):
     try:
@@ -95,11 +94,9 @@ def analyze_single_stock(code, name, ticker_yf, condition_type, start_date, use_
 st.title("🚀 PRO 퀀트 스캐너 (Web Edition)")
 st.markdown("스마트폰에서도 언제 어디서나 시장을 스캔하세요!")
 
-# 👈 사이드바 (설정 메뉴)
 with st.sidebar:
     st.header("⚙️ 스캔 설정")
     
-    # 전략 선택 드롭다운
     strategy_options = {
         "A. 바닥권 줍기": "A", "B. 턴어라운드": "B", 
         "C. 퀀트 판독기": "C", "D. 가치투자 융합": "D", 
@@ -108,15 +105,13 @@ with st.sidebar:
     selected_strategy = st.selectbox("1. 전술을 선택하세요", list(strategy_options.keys()))
     condition_type = strategy_options[selected_strategy]
     
-    st.divider() # 구분선
+    st.divider() 
     
-    # 테마 레이더 & 방어막
     theme_keyword = st.text_input("🔍 2. 테마 필터링 (선택)", placeholder="예: 반도체, 로봇")
     use_shield = st.checkbox("🛡️ 상폐 방어막 가동 (적자 제외)", value=True)
     
     st.divider()
     
-    # VIP 파일 업로드
     vip_file = st.file_uploader("🎯 3. VIP 관심종목 텍스트 업로드", type=['txt'])
     custom_tickers = None
     if vip_file is not None:
@@ -125,13 +120,11 @@ with st.sidebar:
         st.success(f"{len(custom_tickers)}개 관심종목 로드 완료!")
 
     st.divider()
-    # 💡 스캔 시작 버튼
     start_btn = st.button("▶️ 스캔 시작", use_container_width=True, type="primary")
 
 # ==========================================
 # 🏃‍♂️ 5. 스캔 실행 및 결과 출력
 # ==========================================
-# session_state를 사용하여 결과를 임시 저장 (버튼을 눌러도 표가 날아가지 않게 함)
 if 'scan_result' not in st.session_state:
     st.session_state['scan_result'] = pd.DataFrame()
 
@@ -170,7 +163,6 @@ if start_btn:
                 completed_count += 1
                 name = futures[future]
                 
-                # 웹 화면 프로그레스 바 업데이트
                 if completed_count % 5 == 0 or completed_count == total_stocks:
                     progress_val = int((completed_count / total_stocks) * 100)
                     progress_bar.progress(progress_val)
@@ -179,26 +171,44 @@ if start_btn:
                 try:
                     res = future.result(timeout=10)
                     if res:
-                        # 테마 정보 결합
                         res['theme'] = theme_dict.get(res['code'], "정보 없음")
                         results_list.append([res['code'], res['name'], res['theme'], f"{res['close']:,.0f}", res['reason']])
                 except: continue
 
         progress_text.success(f"✅ 스캔 완료! 총 {len(results_list)}개의 종목이 포착되었습니다.")
         
-        # 결과를 데이터프레임으로 변환 후 세션에 저장
         if results_list:
             df_result = pd.DataFrame(results_list, columns=["종목코드", "종목명", "테마/업종", "현재가(원)", "상세 포착 이유"])
             st.session_state['scan_result'] = df_result
 
-# 결과가 있으면 화면에 표로 그려주고 엑셀 다운로드 버튼 생성
+# ==========================================
+# 📊 6. 결과 렌더링 및 필터링 기능 (업데이트 됨!)
+# ==========================================
 if not st.session_state['scan_result'].empty:
+    st.markdown("---")
     st.subheader("📊 스캔 결과")
     
-    # 모바일에서도 예쁘게 스크롤되는 데이터 표
-    st.dataframe(st.session_state['scan_result'], use_container_width=True)
+    # 원본 데이터프레임 가져오기
+    df_view = st.session_state['scan_result']
+    total_count = len(df_view)
     
-    # 💡 웹 전용 엑셀 다운로드 기능
+    # 💡 다중 조건 필터 스위치 (토글)
+    col1, col2 = st.columns([1, 2])
+    with col1:
+        # 스마트폰에서 누르기 편한 토글 버튼 생성
+        show_multi_only = st.toggle("🔥 다중 조건(중복 포착) 종목만 보기", value=False)
+        
+    # 필터가 켜졌다면 데이터프레임 거르기
+    if show_multi_only:
+        df_view = df_view[df_view['상세 포착 이유'].str.contains("중복 포착", na=False)]
+        filtered_count = len(df_view)
+        st.info(f"💡 전체 {total_count}개 중, 다중 조건이 겹친 {filtered_count}개 종목만 필터링 되었습니다.")
+    else:
+        st.info(f"💡 전체 {total_count}개 종목이 표시 중입니다.")
+    
+    # 필터링이 적용된 데이터프레임을 화면에 출력
+    st.dataframe(df_view, use_container_width=True)
+    
     @st.cache_data
     def convert_df(df):
         from io import BytesIO
@@ -207,9 +217,10 @@ if not st.session_state['scan_result'].empty:
             df.to_excel(writer, index=False, sheet_name='스캔결과')
         return output.getvalue()
     
-    excel_data = convert_df(st.session_state['scan_result'])
+    # 💡 엑셀 다운로드도 필터링된 데이터(df_view)를 기준으로 다운로드 되도록 연동
+    excel_data = convert_df(df_view)
     st.download_button(
-        label="📥 엑셀 파일로 다운로드",
+        label="📥 엑셀 파일로 다운로드 (현재 보이는 표 기준)",
         data=excel_data,
         file_name=f"웹스캔결과_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
