@@ -5,3 +5,4 @@ ta
 finance-datareader
 openpyxl
 supabase
+mpf
