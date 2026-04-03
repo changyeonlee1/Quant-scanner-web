@@ -1,8 +1,7 @@
 streamlit
-pandas
 yfinance
+pandas
+numpy
 ta
-finance-datareader
-openpyxl
-supabase
-mpf
+mplfinance
+requests
