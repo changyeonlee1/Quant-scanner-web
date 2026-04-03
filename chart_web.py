@@ -1,229 +1,239 @@
 import streamlit as st
-import pandas as pd
 import yfinance as yf
+import pandas as pd
+import numpy as np
 from ta.momentum import RSIIndicator
 from ta.trend import MACD
 from ta.volatility import BollingerBands
-import FinanceDataReader as fdr
-import concurrent.futures
-from datetime import datetime, timedelta
-import re
+import mplfinance as mpf
+import json
+import os
+import requests
+import xml.etree.ElementTree as ET
+
+WATCHLIST_FILE = "watchlist_v6.json"
+
+st.set_page_config(page_title="AI 퀀트 대시보드", page_icon="📊", layout="wide")
 
 # ==========================================
-# 💎 1. 웹페이지 기본 설정 (모바일 최적화)
+# 🌟 관심종목 파일 로드 및 저장 함수
 # ==========================================
-st.set_page_config(page_title="PRO 퀀트 스캐너 웹", page_icon="🚀", layout="wide")
+def load_watchlist():
+    if os.path.exists(WATCHLIST_FILE):
+        try:
+            with open(WATCHLIST_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except: pass
+    return ["BTC"]
+
+def save_watchlist(watchlist):
+    with open(WATCHLIST_FILE, 'w', encoding='utf-8') as f:
+        json.dump(watchlist, f, ensure_ascii=False, indent=4)
 
 # ==========================================
-# 🧠 2. 데이터 캐싱 (매번 다운로드 방지하여 속도 극대화)
+# 사이드바: 관심종목 관리 및 분석 설정
 # ==========================================
-@st.cache_data(ttl=3600) 
-def load_krx_data():
-    df_krx = fdr.StockListing('KRX')
-    df_desc = fdr.StockListing('KRX-DESC')
-    
-    theme_dict = {}
-    for _, row in df_desc.iterrows():
-        sector = str(row['Sector']) if pd.notna(row['Sector']) else ""
-        industry = str(row['Industry']) if pd.notna(row['Industry']) else ""
-        theme_dict[row['Code']] = f"{sector} ({industry})" if sector and industry else (sector or industry or "정보 없음")
-        
-    return df_krx, df_desc, theme_dict
+st.sidebar.title("📌 관심종목 관리")
+current_watchlist = load_watchlist()
+
+# 종목 추가
+new_ticker = st.sidebar.text_input("새 종목코드 입력 (예: ETH, 005930)").upper().strip()
+if st.sidebar.button("➕ 리스트에 추가", use_container_width=True):
+    if new_ticker and new_ticker not in current_watchlist:
+        current_watchlist.append(new_ticker)
+        save_watchlist(current_watchlist)
+        st.sidebar.success(f"'{new_ticker}' 추가 완료!")
+        st.rerun()
+    elif new_ticker in current_watchlist:
+        st.sidebar.warning("이미 등록된 종목입니다.")
+
+# 종목 삭제
+if current_watchlist:
+    del_ticker = st.sidebar.selectbox("삭제할 종목 선택", current_watchlist)
+    if st.sidebar.button("➖ 리스트에서 삭제", use_container_width=True):
+        current_watchlist.remove(del_ticker)
+        save_watchlist(current_watchlist)
+        st.sidebar.success(f"'{del_ticker}' 삭제 완료!")
+        st.rerun()
+
+st.sidebar.markdown("---")
+st.sidebar.title("⚙️ 분석 설정")
+ticker = st.sidebar.selectbox("분석할 종목코드", current_watchlist) if current_watchlist else "BTC"
+tf_selection = st.sidebar.selectbox("차트 시간대", ["1시간", "4시간", "일봉", "주봉"], index=1)
+lookback = st.sidebar.number_input("파동 기준봉", min_value=30, max_value=300, value=60)
+target_fib = st.sidebar.selectbox("피보나치 목표", [0.382, 0.500, 0.618, 0.786], index=2)
 
 # ==========================================
-# ⚙️ 3. 단일 종목 분석 엔진
+# 메인 화면 영역
 # ==========================================
-def analyze_single_stock(code, name, ticker_yf, condition_type, start_date, use_shield):
+st.title("📊 나만의 퀀트 분석 웹사이트")
+st.markdown("PC는 물론 스마트폰에서도 접속하여 실시간 차트와 분석 리포트를 확인할 수 있습니다.")
+
+@st.cache_data(ttl=300) 
+def get_data(symbol, tf, limit):
     try:
-        df = fdr.DataReader(code, start_date)
-        if df.empty or len(df) < 230: return None
-        for col in ['Open', 'High', 'Low', 'Close', 'Volume']: df[col] = pd.to_numeric(df[col], errors='coerce')
-        df = df.dropna(subset=['Close'])
-
-        df['SMA20'] = df['Close'].rolling(window=20).mean(); df['SMA224'] = df['Close'].rolling(window=224).mean()
-        bb = BollingerBands(close=df['Close'], window=20, window_dev=2); df['BB_L'] = bb.bollinger_lband()
-        df['RSI'] = RSIIndicator(close=df['Close'], window=14).rsi()
-        macd = MACD(close=df['Close']); df['MACD_Line'] = macd.macd(); df['MACD_Hist'] = macd.macd_diff()
-        
-        curr_close = float(df['Close'].iloc[-1]); prev_close = float(df['Close'].iloc[-2])
-        curr_volume = float(df['Volume'].iloc[-1]); avg_volume = float(df['Volume'].tail(6).head(5).mean())
-        curr_rsi = float(df['RSI'].iloc[-1]); curr_bb_l = float(df['BB_L'].iloc[-1])
-        curr_macd_hist = float(df['MACD_Hist'].iloc[-1]); prev_macd_hist = float(df['MACD_Hist'].iloc[-2])
-        curr_macd_line = float(df['MACD_Line'].iloc[-1])
-        curr_sma224 = float(df['SMA224'].iloc[-1]); prev_sma224 = float(df['SMA224'].iloc[-2])
-
-        matched_conds = []; reasons = []
-
-        if condition_type in ["A", "ALL"]:
-            if curr_rsi <= 40 and curr_close <= curr_bb_l * 1.03: matched_conds.append("A"); reasons.append(f"[A] RSI바닥+볼린저")
-        if condition_type in ["B", "ALL"]:
-            if curr_macd_line < 0 and curr_macd_hist > prev_macd_hist and prev_macd_hist < 0: matched_conds.append("B"); reasons.append("[B] MACD 턴어라운드")
-        if condition_type in ["C", "ALL"]:
-            score = 0
-            if curr_rsi <= 40: score += 1
-            elif curr_rsi > float(df['RSI'].iloc[-2]) and float(df['RSI'].iloc[-2]) < 35: score += 2
-            if curr_close <= curr_bb_l * 1.02: score += 1
-            if curr_macd_hist > 0 and prev_macd_hist <= 0: score += 2
-            elif curr_macd_hist > prev_macd_hist and curr_macd_hist < 0: score += 1
-            if score >= 3: matched_conds.append("C"); reasons.append(f"[C] 퀀트점수 {score}점")
-        if condition_type in ["D", "ALL"]:
-            if curr_rsi <= 45:
-                try:
-                    pbr = yf.Ticker(ticker_yf).info.get('priceToBook', 99)
-                    if pbr and float(pbr) <= 1.0: matched_conds.append("D"); reasons.append(f"[D] PBR {float(pbr):.2f}+차트바닥")
-                except: pass
-        if condition_type in ["E", "ALL"]:
-            if (prev_close <= prev_sma224) and (curr_close > curr_sma224) and (curr_volume >= avg_volume * 2.0):
-                matched_conds.append("E"); reasons.append(f"[🍚E] 밥그릇3번(거래량 {curr_volume / avg_volume if avg_volume > 0 else 0:.1f}배)")
-
-        if matched_conds:
-            if use_shield:
-                try:
-                    eps = yf.Ticker(ticker_yf).info.get('trailingEps', 1)
-                    if eps is not None and float(eps) < 0: return None 
-                except: pass
-
-            final_reason = f"🔥 [중복 포착: {', '.join(matched_conds)}] " + " / ".join(reasons) if len(matched_conds) >= 2 else reasons[0]
-            return {"code": code, "name": name, "close": curr_close, "reason": final_reason}
-        return None
-    except Exception: return None
-
-# ==========================================
-# 🎨 4. 웹 화면 UI 구성 (사이드바 & 메인)
-# ==========================================
-st.title("🚀 PRO 퀀트 스캐너 (Web Edition)")
-st.markdown("스마트폰에서도 언제 어디서나 시장을 스캔하세요!")
-
-with st.sidebar:
-    st.header("⚙️ 스캔 설정")
-    
-    strategy_options = {
-        "A. 바닥권 줍기": "A", "B. 턴어라운드": "B", 
-        "C. 퀀트 판독기": "C", "D. 가치투자 융합": "D", 
-        "🍚 E. 밥그릇 3번 자리": "E", "🌟 전술 통합 스캔 (ALL)": "ALL"
-    }
-    selected_strategy = st.selectbox("1. 전술을 선택하세요", list(strategy_options.keys()))
-    condition_type = strategy_options[selected_strategy]
-    
-    st.divider() 
-    
-    theme_keyword = st.text_input("🔍 2. 테마 필터링 (선택)", placeholder="예: 반도체, 로봇")
-    use_shield = st.checkbox("🛡️ 상폐 방어막 가동 (적자 제외)", value=True)
-    
-    st.divider()
-    
-    vip_file = st.file_uploader("🎯 3. VIP 관심종목 텍스트 업로드", type=['txt'])
-    custom_tickers = None
-    if vip_file is not None:
-        content = vip_file.getvalue().decode("utf-8")
-        custom_tickers = [re.search(r'\d{6}', line).group() for line in content.splitlines() if re.search(r'\d{6}', line)]
-        st.success(f"{len(custom_tickers)}개 관심종목 로드 완료!")
-
-    st.divider()
-    start_btn = st.button("▶️ 스캔 시작", use_container_width=True, type="primary")
-
-# ==========================================
-# 🏃‍♂️ 5. 스캔 실행 및 결과 출력
-# ==========================================
-if 'scan_result' not in st.session_state:
-    st.session_state['scan_result'] = pd.DataFrame()
-
-if start_btn:
-    df_krx, df_desc, theme_dict = load_krx_data()
-    
-    if theme_keyword:
-        mask = df_desc['Sector'].fillna('').str.contains(theme_keyword, case=False) | df_desc['Industry'].fillna('').str.contains(theme_keyword, case=False) | df_desc['Name'].fillna('').str.contains(theme_keyword, case=False)
-        theme_codes = df_desc[mask]['Code'].tolist()
-        df_krx = df_krx[df_krx['Code'].isin(theme_codes)]
-    elif custom_tickers:
-        df_krx = df_krx[df_krx['Code'].isin(custom_tickers)]
-    else:
-        df_krx = df_krx[df_krx['Marcap'] > 0].sort_values('Marcap', ascending=False)
-        
-    total_stocks = len(df_krx)
-    
-    if total_stocks == 0:
-        st.error("⚠️ 조건에 맞는 종목이 없습니다.")
-    else:
-        progress_text = st.empty()
-        progress_bar = st.progress(0)
-        
-        start_date = (datetime.now() - timedelta(days=550)).strftime('%Y-%m-%d')
-        results_list = []
-        completed_count = 0
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=7) as executor:
-            futures = {}
-            for _, row in df_krx.iterrows():
-                code = row['Code']; name = row['Name']
-                ticker_yf = code + (".KS" if row['Market'] == 'KOSPI' else ".KQ")
-                futures[executor.submit(analyze_single_stock, code, name, ticker_yf, condition_type, start_date, use_shield)] = name
-
-            for future in concurrent.futures.as_completed(futures):
-                completed_count += 1
-                name = futures[future]
+        # 📈 1. 한국 주식 (네이버 금융 API 호출)
+        if symbol.endswith(".KS") or symbol.endswith(".KQ") or (len(symbol) == 6 and symbol.isdigit()):
+            clean_symbol = ''.join(filter(str.isdigit, symbol))
+            naver_tf = {"일봉": "day", "주봉": "week"}.get(tf, "day") 
+            
+            url = f"https://fchart.stock.naver.com/sise.nhn?symbol={clean_symbol}&timeframe={naver_tf}&count={limit + 50}&requestType=0"
+            res = requests.get(url)
+            
+            if res.status_code != 200:
+                st.error("네이버 금융 서버와 연결할 수 없습니다.")
+                return pd.DataFrame()
+            
+            xml_str = res.content.decode('euc-kr', 'replace').replace('EUC-KR', 'utf-8').replace('euc-kr', 'utf-8')
+            root = ET.fromstring(xml_str.encode('utf-8'))
+            
+            items = root.findall('.//item')
+            if not items:
+                st.error(f"[{symbol}] 네이버 금융에 존재하지 않는 종목코드이거나 상장폐지된 종목입니다.")
+                return pd.DataFrame()
                 
-                if completed_count % 5 == 0 or completed_count == total_stocks:
-                    progress_val = int((completed_count / total_stocks) * 100)
-                    progress_bar.progress(progress_val)
-                    progress_text.text(f"🔍 스캔 중... [{completed_count}/{total_stocks}] {name} 분석 완료 | 포착: {len(results_list)}개")
+            data = [item.attrib['data'].split('|') for item in items]
+            df = pd.DataFrame(data, columns=['Date', 'Open', 'High', 'Low', 'Close', 'Volume'])
+            
+            df['Date'] = pd.to_datetime(df['Date'])
+            df.set_index('Date', inplace=True)
+            for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
+                df[col] = df[col].astype(float)
+                
+            return df.tail(limit)
 
-                try:
-                    res = future.result(timeout=10)
-                    if res:
-                        res['theme'] = theme_dict.get(res['code'], "정보 없음")
-                        results_list.append([res['code'], res['name'], res['theme'], f"{res['close']:,.0f}", res['reason']])
-                except: continue
+        # 🪙 2. 코인 (바이낸스 API 직접 호출)
+        else:
+            clean_symbol = symbol.replace("-USD", "").replace("USDT", "") + "USDT"
+            binance_itv = {"1시간": "1h", "4시간": "4h", "일봉": "1d", "주봉": "1w"}.get(tf, "1d")
+            
+            url = "https://api.binance.com/api/v3/klines"
+            params = {"symbol": clean_symbol, "interval": binance_itv, "limit": limit + 50}
+            res = requests.get(url, params=params)
+            
+            if res.status_code != 200:
+                st.error(f"바이낸스에서 {clean_symbol} 데이터를 찾을 수 없습니다.")
+                return pd.DataFrame()
 
-        progress_text.success(f"✅ 스캔 완료! 총 {len(results_list)}개의 종목이 포착되었습니다.")
+            data = res.json()
+            df = pd.DataFrame(data, columns=['Open time', 'Open', 'High', 'Low', 'Close', 'Volume', 'Close time', 'Quote asset volume', 'Number of trades', 'Taker buy base asset volume', 'Taker buy quote asset volume', 'Ignore'])
+            
+            df.index = pd.to_datetime(df['Open time'], unit='ms') + pd.Timedelta(hours=9)
+            for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
+                df[col] = df[col].astype(float)
+
+            return df[['Open', 'High', 'Low', 'Close', 'Volume']].tail(limit)
+
+    except Exception as e:
+        st.error(f"데이터 로딩 중 에러 발생: {e}")
+        return pd.DataFrame()
+
+if st.button("🔍 차트 분석 실행", type="primary"):
+    with st.spinner(f"[{ticker}] 데이터를 불러오고 차트를 그리는 중..."):
+        df = get_data(ticker, tf_selection, lookback + 50)
         
-        if results_list:
-            df_result = pd.DataFrame(results_list, columns=["종목코드", "종목명", "테마/업종", "현재가(원)", "상세 포착 이유"])
-            st.session_state['scan_result'] = df_result
+        if df.empty:
+            st.error("데이터를 불러오지 못했습니다. 종목코드를 다시 확인해 주세요.")
+        else:
+            # 1. 보조지표 계산
+            df['SMA20'] = df['Close'].rolling(20).mean()
+            bb = BollingerBands(df['Close'], window=20, window_dev=2)
+            df['BB_H'] = bb.bollinger_hband()
+            df['BB_L'] = bb.bollinger_lband()
+            df['RSI'] = RSIIndicator(df['Close'], window=14).rsi()
+            macd = MACD(df['Close'])
+            df['MACD_Line'] = macd.macd()
+            df['MACD_Signal'] = macd.macd_signal()
+            df['MACD_Hist'] = macd.macd_diff()
+            
+            plot_df = df.tail(lookback).copy()
+            current_close = float(plot_df['Close'].iloc[-1])
+            curr_rsi = float(plot_df['RSI'].iloc[-1])
+            
+            # 🌟 2. FVG (공정 가치 갭) 시각화 데이터 계산 (화면에 보이는 차트 기준)
+            fvg_top = None
+            fvg_bottom = None
+            
+            for i in range(len(plot_df)-30, len(plot_df)-2):
+                if i < 0: continue
+                c1_high = plot_df['High'].iloc[i]
+                c3_low = plot_df['Low'].iloc[i+2]
+                
+                # 상승 FVG 발견
+                if c3_low > c1_high:
+                    is_filled = False
+                    for j in range(i+3, len(plot_df)-1):
+                        if plot_df['Low'].iloc[j] <= c1_high:
+                            is_filled = True
+                            break
+                    
+                    if not is_filled:
+                        fvg_top = c3_low
+                        fvg_bottom = c1_high
+            
+            # 3. 화면 분할 및 출력
+            col1, col2 = st.columns([1, 2.5])
+            
+            with col1:
+                st.subheader("📝 분석 리포트")
+                
+                currency = "₩" if ticker.endswith(".KS") or ticker.endswith(".KQ") or ticker.isdigit() else "$"
+                format_str = ",.0f" if currency == "₩" else ",.2f"
+                
+                st.write(f"**현재가:** {currency}{current_close:{format_str}}")
+                st.write(f"**현재 RSI:** {curr_rsi:.2f}")
+                
+                if curr_rsi < 35:
+                    st.success("🟢 [매수 시그널] RSI 과매도 구간 진입")
+                elif curr_rsi > 65:
+                    st.error("🔴 [매도 시그널] RSI 과매수 구간 진입")
+                else:
+                    st.warning("⚪ [관망] 뚜렷한 진입 근거 부족")
+                    
+                st.metric(label="목표 피보나치 달성률", value=f"{target_fib * 100}%", delta="진입 대기")
 
-# ==========================================
-# 📊 6. 결과 렌더링 및 필터링 기능 (UI 강조 업데이트 적용)
-# ==========================================
-if not st.session_state['scan_result'].empty:
-    st.markdown("---")
-    st.subheader("📊 스캔 결과")
-    
-    df_view = st.session_state['scan_result']
-    total_count = len(df_view)
-    
-    with st.container(border=True):
-        st.markdown("#### 🎯 핵심 타점 압축 필터")
-        col1, col2 = st.columns([1, 1])
-        with col1:
-            show_multi_only = st.toggle("🔥 [강력 추천] 2개 이상 조건이 겹친 '진국 종목'만 남기기", value=False)
-        with col2:
-            if show_multi_only:
-                st.success("✅ 필터 ON: 노이즈가 제거된 최상급 타점만 표시 중입니다.")
-            else:
-                st.caption("👈 스위치를 켜면 승률이 가장 높은 알짜 종목만 골라냅니다.")
-        
-    if show_multi_only:
-        df_view = df_view[df_view['상세 포착 이유'].str.contains("중복 포착", na=False)]
-        filtered_count = len(df_view)
-        st.warning(f"💡 전체 {total_count}개 중, 강력한 다중 조건이 겹친 **{filtered_count}개** 종목만 엑기스로 뽑아냈습니다.")
-    else:
-        st.info(f"💡 전체 {total_count}개 종목이 표시 중입니다. (위 스위치를 켜서 종목을 압축해 보세요!)")
-    
-    st.dataframe(df_view, use_container_width=True)
-    
-    @st.cache_data
-    def convert_df(df):
-        from io import BytesIO
-        output = BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            df.to_excel(writer, index=False, sheet_name='스캔결과')
-        return output.getvalue()
-    
-    excel_data = convert_df(df_view)
-    st.download_button(
-        label="📥 엑셀 파일로 다운로드 (현재 보이는 표 기준)",
-        data=excel_data,
-        file_name=f"웹스캔결과_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        type="primary"
-    )
+                # 🌟 FVG 구간 리포트 추가
+                st.markdown("---")
+                st.write("**🏦 스마트 머니 (FVG) 분석**")
+                if fvg_top and fvg_bottom:
+                    st.info(f"🧲 대기 구간: {currency}{fvg_bottom:{format_str}} ~ {currency}{fvg_top:{format_str}}")
+                    if fvg_bottom <= current_close <= fvg_top:
+                        st.success("🎯 현재 주가가 FVG 구역 내부에 진입했습니다! (타점 포착)")
+                    else:
+                        st.write("주가가 아직 FVG 구역에 진입하지 않았습니다.")
+                else:
+                    st.write("발견된 미체결 FVG(빈 공간)가 없습니다.")
+
+            with col2:
+                s = mpf.make_mpf_style(base_mpf_style='nightclouds')
+                macd_colors = ['#26a69a' if val > 0 else '#ef5350' for val in plot_df['MACD_Hist']]
+                
+                ap = [
+                    mpf.make_addplot(plot_df['BB_H'], color='cyan', alpha=0.5),
+                    mpf.make_addplot(plot_df['BB_L'], color='cyan', alpha=0.5),
+                    mpf.make_addplot(plot_df['SMA20'], color='yellow'),
+                    mpf.make_addplot(plot_df['RSI'], panel=1, color='magenta', ylabel='RSI'),
+                    mpf.make_addplot(plot_df['MACD_Hist'], type='bar', panel=2, color=macd_colors, alpha=0.5, ylabel='MACD'),
+                    mpf.make_addplot(plot_df['MACD_Line'], panel=2, color='deepskyblue'),
+                    mpf.make_addplot(plot_df['MACD_Signal'], panel=2, color='orange'),
+                ]
+                
+                # 🌟 차트에 FVG 라인 점선으로 그리기
+                fvg_lines = None
+                if fvg_top and fvg_bottom:
+                    fvg_lines = dict(hlines=[fvg_bottom, fvg_top], colors=['#00FF00', '#00FF00'], linestyle='--', linewidths=1.5, alpha=0.7)
+
+                # FVG 라인이 있으면 포함해서 그리고, 없으면 기본 차트만 그림
+                if fvg_lines:
+                    fig, axes = mpf.plot(
+                        plot_df, type='candle', style=s, addplot=ap,
+                        panel_ratios=(4, 1.5, 1.5), figsize=(10, 7), returnfig=True,
+                        title=f"{ticker} ({tf_selection})", hlines=fvg_lines
+                    )
+                else:
+                    fig, axes = mpf.plot(
+                        plot_df, type='candle', style=s, addplot=ap,
+                        panel_ratios=(4, 1.5, 1.5), figsize=(10, 7), returnfig=True,
+                        title=f"{ticker} ({tf_selection})"
+                    )
+                st.pyplot(fig)
