@@ -1,6 +1,6 @@
 streamlit
 supabase
-FinanceDataReader
+finance-dataReader
 pandas
 yfinance
 ta
