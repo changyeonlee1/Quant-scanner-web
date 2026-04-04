@@ -1,7 +1,8 @@
 streamlit
-yfinance
+supabase
+FinanceDataReader
 pandas
-numpy
+yfinance
 ta
-mplfinance
-requests
+streamlit-cookies-manager
+openpyxl
